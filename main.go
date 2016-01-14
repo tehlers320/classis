@@ -80,7 +80,7 @@ func main() {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, os.Kill)
 
-	// gather metrics
+	// gather metrics from AWS and push them to the metricSink
 	go func() {
 		for {
 			gatherInstanceMetrics(metricSink)
@@ -96,7 +96,7 @@ func main() {
 		}
 	}()
 
-	// pump metrics to kinesis
+	// send the currently gathered metrics to Kinesis
 	go func() {
 		for {
 			metrics.Send()
@@ -106,13 +106,11 @@ func main() {
 
 	// block until we receive an OS interrupt
 	<-interrupt
-	log.Printf("stopping metrics gathering\n")
 	fetchTicker.Stop()
-	log.Printf("flushing metrics to kinesis\n")
+	log.Printf("flushing outstanding metrics to kinesis\n")
 	sendTicker.Stop()
 	metrics.Send()
 	log.Printf("%d metrics was sent to kinesis\n", metrics.MetricsSent)
-	log.Printf("all done, have a lovely day\n")
 }
 
 // assumeRole uses the STS get assume the roleARN role and returns a Session that
@@ -124,31 +122,31 @@ func assumeRole(roleARN, region string) *session.Session {
 	})
 }
 
-// Fetches the count of EC2 and RDS instance types and pushes them to the out channel
+// gatherInstanceMetrics fetches the count of EC2 and RDS instance types and should
+// push a string to the out channel in graphite format: "namespace.metrics value timestamp"
+// note that there is no need terminating the string with a \n
 func gatherInstanceMetrics(out chan string) {
 	for _, regionName := range regions {
-
-		if ec2Instances, err := getEc2Instances(regionName); err == nil {
-			for instanceType, instCount := range sumEc2InstanceTypes(ec2Instances) {
-				out <- fmt.Sprintf("aws.%s.instance_types.ec2.%s %d %d", regionName, instanceType, instCount, int32(time.Now().Unix()))
-			}
-		} else {
-			log.Printf("%s", err)
+		ec2Instances, err := getEc2Instances(regionName)
+		if err == nil {
+			log.Printf("%s\n", err)
+		}
+		for instanceType, instCount := range sumEc2InstanceTypes(ec2Instances) {
+			out <- fmt.Sprintf("aws.%s.instance_types.ec2.%s %d %d", regionName, instanceType, instCount, int32(time.Now().Unix()))
 		}
 
-		if rdsInstances, err := getRDSInstances(regionName); err == nil {
-			for rdsType, rdsCount := range sumRdsInstanceTypes(rdsInstances) {
-				out <- fmt.Sprintf("aws.%s.instance_types.%s %d %d", regionName, rdsType, rdsCount, int32(time.Now().Unix()))
-			}
-		} else {
-			log.Printf("%s", err)
+		rdsInstances, err := getRDSInstances(regionName)
+		if err != nil {
+			log.Printf("%s\n", err)
+		}
+		for rdsType, rdsCount := range sumRdsInstanceTypes(rdsInstances) {
+			out <- fmt.Sprintf("aws.%s.instance_types.%s %d %d", regionName, rdsType, rdsCount, int32(time.Now().Unix()))
 		}
 	}
 }
 
 func getEc2Instances(region string) ([]*ec2.Instance, error) {
 	var instances []*ec2.Instance
-
 	service := ec2.New(assumeRole(awsArn, region))
 	result, err := service.DescribeInstances(&ec2.DescribeInstancesInput{})
 	if err != nil {
@@ -175,6 +173,7 @@ func getRDSInstances(region string) ([]*rds.DBInstance, error) {
 	return instances, nil
 }
 
+// sumEc2InstanceTypes returns a count of EC2 instances that AWS will charge for
 func sumEc2InstanceTypes(ec2Instances []*ec2.Instance) map[string]int {
 	ec2InstanceTypes := make(map[string]int, 0)
 	for _, instance := range ec2Instances {
@@ -185,6 +184,7 @@ func sumEc2InstanceTypes(ec2Instances []*ec2.Instance) map[string]int {
 	return ec2InstanceTypes
 }
 
+// sumRdsInstanceTypes returns a count of RDS instances that AWS will charge for
 func sumRdsInstanceTypes(rdsInstances []*rds.DBInstance) map[string]int {
 	rdsInstanceTypes := make(map[string]int, 0)
 	for _, instance := range rdsInstances {
