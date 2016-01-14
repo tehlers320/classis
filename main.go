@@ -75,7 +75,7 @@ func main() {
 	// fetch new metrics this often
 	fetchTicker := time.NewTicker(time.Second * 45)
 	// put metrics to kinesis this often
-	sendTicker := time.NewTicker(time.Second * 30)
+	sendTicker := time.NewTicker(time.Second * 10)
 	// send an os.Signal to this channel to stop the program
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, os.Kill)
@@ -128,7 +128,7 @@ func assumeRole(roleARN, region string) *session.Session {
 func gatherInstanceMetrics(out chan string) {
 	for _, regionName := range regions {
 		ec2Instances, err := getEc2Instances(regionName)
-		if err == nil {
+		if err != nil {
 			log.Printf("%s\n", err)
 		}
 		for instanceType, instCount := range sumEc2InstanceTypes(ec2Instances) {
