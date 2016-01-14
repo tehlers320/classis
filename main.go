@@ -1,6 +1,10 @@
 package main
 
+// classis fetches metrics from AWS and pushes them in a graphite format to kinesis
+// usage: classis --region ap-southeast-2 --stream-name kinesis-stream-name --arn arn:aws:iam::111111111111:role/role_name
+
 // @todo: sort out proper logging and error handling / reporting
+// @todo: write proper README with necessary role permissions
 
 import (
 	"flag"
