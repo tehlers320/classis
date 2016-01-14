@@ -1,7 +1,8 @@
 package main
 
+// @todo: sort out proper logging and error handling / reporting
+
 import (
-	"crypto/md5"
 	"flag"
 	"fmt"
 	"github.com/aws/aws-sdk-go/aws"
@@ -11,16 +12,19 @@ import (
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/rds"
 	"log"
+	"os"
+	"os/signal"
 	"time"
 )
 
 var (
-	awsArn        = ""
-	awsRegion     = ""
-	awsStreamName = ""
-	maxRetries    = 3
+	awsArn        = "" // the ARN uri for the role to assume
+	awsRegion     = "" // the region to use for assuming the role
+	awsStreamName = "" // the kinesis stream name
+	maxRetries    = 3  // try sending kinesis this many times before aborting
 )
 
+// regions are all the available AWS regions, not sure if there is an API to fetch them
 var regions = []string{
 	"us-east-1",
 	"us-west-2",
@@ -56,114 +60,115 @@ func main() {
 	kWriter := &KWriter{
 		Client: kinesis.New(assumeRole(awsArn, awsRegion)),
 	}
-
 	// keep a buffer of roughly 1mb if every metric is around 60bytes
 	// 60 * 1,024 * 16 = 0.94mb
 	// if we are fetching 100 metrics per minute this buffer should last for
 	// 16,384 / 100 = 163.84 min ~= 2hr 43 minutes
 	metrics := NewMetrics(kWriter, 1024*16)
 
+	// metrics gatherers should push metrics to this channel
 	metricSink := make(chan string, 1024)
-	fetchTicker := time.NewTicker(time.Second * 60)
-	sendTicker := time.NewTicker(time.Second * 10)
+	// fetch new metrics this often
+	fetchTicker := time.NewTicker(time.Second * 45)
+	// put metrics to kinesis this often
+	sendTicker := time.NewTicker(time.Second * 30)
+	// send an os.Signal to this channel to stop the program
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt, os.Kill)
 
+	// gather metrics
 	go func() {
-		for range fetchTicker.C {
-			//			log.Printf("fetching")
-			perMinute(metricSink)
+		for {
+			gatherInstanceMetrics(metricSink)
+			<-fetchTicker.C
 		}
 	}()
 
-	go func() {
-		for range sendTicker.C {
-			//			log.Printf("sending")
-			metrics.Pump()
-		}
-	}()
-
+	// pump metrics from the metric sink channel to the Metrics struct
 	go func() {
 		for {
 			value := <-metricSink
-			//			log.Printf("adding %s", value)
 			metrics.Add(value)
 		}
 	}()
 
-	time.Sleep(time.Hour * 24)
+	// pump metrics to kinesis
+	go func() {
+		for {
+			metrics.Send()
+			<-sendTicker.C
+		}
+	}()
+
+	// block until we receive an OS interrupt
+	<-interrupt
+	log.Printf("stopping metrics gathering\n")
 	fetchTicker.Stop()
+	log.Printf("flushing metrics to kinesis\n")
 	sendTicker.Stop()
-
+	metrics.Send()
+	log.Printf("%d metrics was sent to kinesis\n", metrics.MetricsSent)
+	log.Printf("all done, have a lovely day\n")
 }
 
-func perMinute(out chan string) {
+// assumeRole uses the STS get assume the roleARN role and returns a Session that
+// can by used by service clients
+func assumeRole(roleARN, region string) *session.Session {
+	return session.New(&aws.Config{
+		Credentials: stscreds.NewCredentials(session.New(&aws.Config{}), roleARN),
+		Region:      aws.String(region),
+	})
+}
+
+// Fetches the count of EC2 and RDS instance types and pushes them to the out channel
+func gatherInstanceMetrics(out chan string) {
 	for _, regionName := range regions {
-		ec2Instances := getEc2Instances(regionName)
-		for instanceType, instCount := range sumEc2InstanceTypes(ec2Instances) {
-			out <- fmt.Sprintf("aws.%s.instance_types.ec2.%s %d %d", regionName, instanceType, instCount, int32(time.Now().Unix()))
-		}
 
-		rdsInstances := getRDSInstances(regionName)
-		for rdsType, rdsCount := range sumRdsInstanceTypes(rdsInstances) {
-			out <- fmt.Sprintf("aws.%s.instance_types.%s %d %d", regionName, rdsType, rdsCount, int32(time.Now().Unix()))
-		}
-	}
-}
-
-type KWriter struct {
-	Client *kinesis.Kinesis
-}
-
-// @todo: Each shard can support up to 1,000 records per second for writes, up to a
-// @todo: maximum total data write rate of 1 MB per second (including partition keys).
-// @todo: This write limit applies to operations such as PutRecord and PutRecords.
-func (k *KWriter) Write(p []byte) (n int, err error) {
-
-	// Partition by hashing the data. This will be a bit random, but will at least ensure all shards are used
-	// (if we ever have more than one)
-	partitionKey := fmt.Sprintf("%x", md5.Sum(p))
-
-	// Try a few times on error. The initial reason for this is Go AWS SDK seems to have some weird timing issue,
-	// where sometimes the request would just EOF if requests are made in regular intervals. For example doing
-	// "put-record" from us-west-1 to ap-southeast-2 every 6-7 seconds will cause EOF error, without the record being sent.
-	for i, backOff := 0, time.Second; i < maxRetries; i, backOff = i+1, backOff*2 {
-		_, err := k.Client.PutRecord(&kinesis.PutRecordInput{
-			Data:         p,
-			PartitionKey: aws.String(partitionKey),
-			StreamName:   aws.String(awsStreamName),
-		})
-
-		if err == nil {
-			//			fmt.Printf("%s", p)
-			return len(p), nil
-		}
-
-		// Send has failed.
-		if i < maxRetries-1 {
-			fmt.Printf("Retrying in %d s, sender failed to put record on try %d: %s.\n", backOff/time.Second, i, err)
-			time.Sleep(backOff)
+		if ec2Instances, err := getEc2Instances(regionName); err == nil {
+			for instanceType, instCount := range sumEc2InstanceTypes(ec2Instances) {
+				out <- fmt.Sprintf("aws.%s.instance_types.ec2.%s %d %d", regionName, instanceType, instCount, int32(time.Now().Unix()))
+			}
 		} else {
-			fmt.Printf("Aborting, sender failed to put record on try %d: %s.\n", i, err)
+			log.Printf("%s", err)
+		}
+
+		if rdsInstances, err := getRDSInstances(regionName); err == nil {
+			for rdsType, rdsCount := range sumRdsInstanceTypes(rdsInstances) {
+				out <- fmt.Sprintf("aws.%s.instance_types.%s %d %d", regionName, rdsType, rdsCount, int32(time.Now().Unix()))
+			}
+		} else {
+			log.Printf("%s", err)
 		}
 	}
-	// @todo: return error from above instead
-	return len(p), nil
 }
 
-func getEc2Instances(region string) []*ec2.Instance {
+func getEc2Instances(region string) ([]*ec2.Instance, error) {
 	var instances []*ec2.Instance
 
 	service := ec2.New(assumeRole(awsArn, region))
 	result, err := service.DescribeInstances(&ec2.DescribeInstancesInput{})
 	if err != nil {
-		fmt.Printf("Failed to list EC2 instance: %s\n", err)
-		return instances
+		return instances, err
 	}
 	for _, reservation := range result.Reservations {
 		for _, instance := range reservation.Instances {
 			instances = append(instances, instance)
 		}
 	}
-	return instances
+	return instances, nil
+}
+
+func getRDSInstances(region string) ([]*rds.DBInstance, error) {
+	var instances []*rds.DBInstance
+	service := rds.New(assumeRole(awsArn, region))
+	result, err := service.DescribeDBInstances(&rds.DescribeDBInstancesInput{})
+	if err != nil {
+		return instances, err
+	}
+	for _, instance := range result.DBInstances {
+		instances = append(instances, instance)
+	}
+	return instances, nil
 }
 
 func sumEc2InstanceTypes(ec2Instances []*ec2.Instance) map[string]int {
@@ -176,32 +181,10 @@ func sumEc2InstanceTypes(ec2Instances []*ec2.Instance) map[string]int {
 	return ec2InstanceTypes
 }
 
-func getRDSInstances(region string) []*rds.DBInstance {
-	var instances []*rds.DBInstance
-	service := rds.New(assumeRole(awsArn, region))
-	result, err := service.DescribeDBInstances(&rds.DescribeDBInstancesInput{})
-	if err != nil {
-		fmt.Printf("Failed to list RDS instance: %s\n", err)
-		return instances
-	}
-
-	for _, instance := range result.DBInstances {
-		instances = append(instances, instance)
-	}
-	return instances
-}
-
 func sumRdsInstanceTypes(rdsInstances []*rds.DBInstance) map[string]int {
 	rdsInstanceTypes := make(map[string]int, 0)
 	for _, instance := range rdsInstances {
 		rdsInstanceTypes[*instance.DBInstanceClass]++
 	}
 	return rdsInstanceTypes
-}
-
-func assumeRole(roleARN, region string) *session.Session {
-	return session.New(&aws.Config{
-		Credentials: stscreds.NewCredentials(session.New(&aws.Config{}), roleARN),
-		Region:      aws.String(region),
-	})
 }

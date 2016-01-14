@@ -29,7 +29,7 @@ func TestSimpleWrite(t *testing.T) {
 	}
 
 	metrics.Add(actual[0])
-	metrics.Pump()
+	metrics.Send()
 	if !reflect.DeepEqual(actual, mock.Content) {
 		t.Errorf("Expected MockWriter.Content to be equal to '%s', got '%s'.", actual, mock.Content)
 	}
@@ -46,7 +46,7 @@ func TestMultipleMetrics(t *testing.T) {
 
 	metrics.Add(actual[0])
 	metrics.Add(actual[1])
-	metrics.Pump()
+	metrics.Send()
 
 	if !reflect.DeepEqual(actual, mock.Content) {
 		t.Errorf("Expected MockWriter.Content to be equal to '%s', got '%s'.", actual, mock.Content)
@@ -63,10 +63,10 @@ func TestAddPumpAddPump(t *testing.T) {
 	}
 
 	metrics.Add(actual[0])
-	metrics.Pump()
+	metrics.Send()
 
 	metrics.Add(actual[1])
-	metrics.Pump()
+	metrics.Send()
 
 	if len(mock.Content) != 1 {
 		t.Errorf("Expected that there would be one written metric in the MockWriter, got %d", len(mock.Content))
@@ -84,7 +84,7 @@ func TestDropOldMetrics(t *testing.T) {
 	metrics.Add("namespace.metric 1 11111")
 	second := "namespace.metric 2 22222"
 	metrics.Add(second)
-	metrics.Pump()
+	metrics.Send()
 
 	if mock.Content[0] != second {
 		t.Errorf("Expected MockWriter.Content[0] to be equal to '%s', got '%s'.", second, mock.Content[0])
