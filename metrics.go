@@ -50,19 +50,56 @@ func (m *Metrics) Send() (int, error) {
 	}
 
 	var data []byte
-	for i := range m.buffer {
-		data = append(data, []byte(m.buffer[i]+"\n")...)
+	var idx int
+
+	m.bufferLock.Lock()
+	for idx = range m.buffer {
+		data = append(data, []byte(m.buffer[idx]+"\n")...)
 	}
-
-	m.MetricsSent += len(m.buffer)
-	m.clearBuffer()
-
+	m.buffer = m.buffer[0:idx] // delete from buffer
+	m.bufferLock.Unlock()
+	m.MetricsSent += idx + 1
 	return m.client.Write(data)
 }
 
-// clear the buffer
-func (m *Metrics) clearBuffer() {
-	m.bufferLock.Lock()
-	m.buffer = nil
-	m.bufferLock.Unlock()
+/*
+
+func getEc2Instances(region string) ([]*ec2.Instance, error) {
+	var instances []*ec2.Instance
+	service := ec2.New(assumeRole(awsArn, region))
+	result, err := service.DescribeInstances(&ec2.DescribeInstancesInput{})
+	if err != nil {
+		return instances, err
+	}
+	for _, reservation := range result.Reservations {
+		for _, instance := range reservation.Instances {
+			instances = append(instances, instance)
+		}
+	}
+	return instances, nil
 }
+
+func getRDSInstances(region string) ([]*rds.DBInstance, error) {
+	var instances []*rds.DBInstance
+	service := rds.New(assumeRole(awsArn, region))
+	result, err := service.DescribeDBInstances(&rds.DescribeDBInstancesInput{})
+	if err != nil {
+		return instances, err
+	}
+	for _, instance := range result.DBInstances {
+		instances = append(instances, instance)
+	}
+	return instances, nil
+}
+
+
+// assumeRole uses the STS get assume the roleARN role and returns a Session that
+// can by used by service clients
+func assumeRole(roleARN, region string) *session.Session {
+	return session.New(&aws.Config{
+		Credentials: stscreds.NewCredentials(session.New(&aws.Config{}), roleARN),
+		Region:      aws.String(region),
+	})
+
+
+*/

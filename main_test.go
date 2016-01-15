@@ -90,3 +90,13 @@ func TestDropOldMetrics(t *testing.T) {
 		t.Errorf("Expected MockWriter.Content[0] to be equal to '%s', got '%s'.", second, mock.Content[0])
 	}
 }
+
+func TestDontSendOnEmpty(t *testing.T) {
+	mock := &MockWriter{}
+	metrics := NewMetrics(mock, 1)
+	metrics.Send()
+
+	if len(mock.Content) != 0 {
+		t.Errorf("Metrics.Send() should not write if the buffer is empty")
+	}
+}
