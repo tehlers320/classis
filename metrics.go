@@ -35,7 +35,7 @@ func (m *Metrics) Add(s string) bool {
 
 	m.buffer = append(m.buffer, s)
 	if len(m.buffer) > m.size {
-		log.Printf("Buffer overflow")
+		log.Printf("Buffer overflowing (max: %d metrics), dropping oldest", m.size)
 		m.buffer = append(m.buffer[:0], m.buffer[1:]...)
 		return false
 	}

@@ -23,7 +23,6 @@ import (
 
 var (
 	awsArn        *string // the ARN uri for the role to assume
-	awsRegion     *string // the region to use for assuming the role
 	awsStreamName *string // the Kinesis stream name
 )
 
@@ -44,7 +43,7 @@ var regions = []string{
 func main() {
 
 	awsArn = flag.String("arn", "", "REQUIRED: ARN of the role to assume")
-	awsRegion = flag.String("region", "", "REQUIRED: Region for the AWS kinesis stream")
+	awsRegion := flag.String("region", "", "REQUIRED: Region for the AWS kinesis stream")
 	awsStreamName = flag.String("stream-name", "", "REQUIRED: Kinesis stream name")
 	flag.Parse()
 
